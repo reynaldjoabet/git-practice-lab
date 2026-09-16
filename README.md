@@ -737,3 +737,187 @@ A worktree is just the bundle of three things from your notes — the per-checko
 - working tree files (checked out on disk),
 - an index (staging area),
 - a HEAD (which branch/commit this checkout is on).
+
+
+`the empty tree always hashes to 4b825dc642cb6eb9a060e54bf8d69288fbee4904 `
+
+Git's modes are a deliberately tiny subset of POSIX:
+
+| Mode | Meaning |
+| --- | --- |
+| `100644` | regular file |
+| `100755` | executable file |
+| `120000` | symlink (blob content = link target) |
+| `040000` | subdirectory (tree) |
+| `160000` | gitlink — a submodule; stores a commit SHA from another repo |
+
+
+### commit — a tree plus provenance
+
+```sh
+$ git cat-file -p HEAD
+tree 74e880a8e901ac5e2eefb6162d1a5121bf89be5d
+author Demo <demo@example.com> 1767225600 +0000
+committer Demo <demo@example.com> 1767225600 +0000
+
+Initial commit
+```
+A commit is: one tree (a complete snapshot of the project, not a diff), zero or more parents, author, committer, message, and optionally a GPG/SSH signature.
+
+```sh
+Git stores a full tree per commit and computes diffs on demand by walking two trees.
+```
+
+Author ≠ committer. Author is who wrote it (preserved through rebases). Committer is who last created this commit object (changes on every rebase/amend). This is why GitHub shows "X authored, Y committed" — and why a rebase changes every SHA even when nothing about the content changed. The committer timestamp moved, and the timestamp is inside the hash.
+
+The parent list is the whole story:
+
+0 parents → root commit
+1 parent → normal commit
+2+ parents → merge commit
+```
+$ git cat-file -p HEAD | head -5
+tree cda5711e22db0be7f76cc8b2458d8577364be030
+parent 04af691bd7093e0fe288da1b007934a6aa50023e
+parent ca30275b8f23813a2b5aec06ac6d75c62066ec87
+author Demo <demo@example.com> 1785893296 +0400
+```
+Parent order matters. Parent 1 is "the branch you were on," parent 2 is "the branch you merged in." That's what `HEAD^1` vs `HEAD^2` mean
+
+
+### tag — an annotated pointer
+An object containing a target SHA, a type, a name, a tagger, a message, and optionally a signature. Used for releases.
+
+Distinguish carefully:
+- Lightweight tag — just a ref file containing a SHA. No object. `git tag v1.0`
+- Annotated tag — a real tag object. `git tag -a v1.0 -m "Release 1.0"`. Can be signed, carries who/when/why.
+
+Ship annotated tags. `git describe` prefers them, they're auditable, and signing them is the foundation of release provenance
+
+```sh
+commit ac5d138
+   │  tree 74e880a
+   ▼
+tree 74e880a ──── README.md ──► blob ce01362 "hello\n"
+             └─── src/      ──► tree b9270df ──► main.go ──► blob 06ab7d0
+```
+A commit is a Merkle DAG root. Change one byte in main.go → new blob SHA → new src tree SHA → new root tree SHA → new commit SHA. The commit SHA transitively verifies every byte of the project.
+
+That property is why a git SHA is a legitimate build identity, and why the entire supply-chain security industry (§8.6) is built on it. When you tag a Docker image with a git SHA, you're asserting something cryptographically meaningful.
+
+```sh
+                        BEFORE                         AFTER
+commit          ac5d1384...                 →   1c12b615...     ✅ changed
+  └─ root tree  74e880a8...                 →   d5ad90df...     ✅ changed
+      ├─ README.md → blob ce013625...       →   ce013625...     ❌ UNCHANGED
+      └─ src/     → tree b9270df7...        →   caed5474...     ✅ changed
+            └─ main.go → blob 06ab7d0f...   →   1f4cfcba...     ✅ changed
+```
+
+`git diff` walks two trees in parallel, and whenever two tree SHAs are equal it skips the entire subtree without descending.
+
+You've now seen the Merkle cascade go up the tree, within one commit. It also goes forward through history, because the parent SHA is inside the commit object:
+
+```sh
+commit
+  tree   d5ad90df...      ← content axis: covers the whole project
+  parent ac5d1384...      ← history axis: covers all ancestry
+  ```
+That's the entire explanation for rebase behavior. Amend one commit and every commit above it gets a new SHA even though its content is byte-identical. And it's why, in the stacked-PR conversation, rewriting a lower branch orphans every branch above it: those branch refs still point at commits whose parent chain no longer exists under any name.
+
+  
+```sh
+commit ac5d138
+   │  tree 74e880a
+   ▼
+tree 74e880a ──── README.md ──► blob ce01362 "hello\n"
+             └─── src/      ──► tree b9270df ──► main.go ──► blob 06ab7d0
+```
+
+A commit is a Merkle DAG root. Change one byte in main.go → new blob SHA → new src tree SHA → new root tree SHA → new commit SHA. The commit SHA transitively verifies every byte of the project.
+
+That property is why a git SHA is a legitimate build identity, and why the entire supply-chain security industry (§8.6) is built on it. When you tag a Docker image with a git SHA, you're asserting something cryptographically meaningful.
+
+### Refs are files containing SHAs
+A branch is not a container. It's a 41-byte file.
+```sh
+$ cat .git/refs/heads/main
+ac5d1384fc3f0740104bdaacabb4af11e0fde1dc
+```
+That's the entire implementation of branches. Creating one is writing a file — O(1), regardless of repo size. This is the thing git got right that made cheap branching possible and made the whole PR 
+
+```sh
+ cat .git/HEAD
+ref: refs/heads/main
+```
+`HEAD `is a symbolic ref — a pointer to a pointer.
+
+"You are on branch main." Commit, and git writes the new SHA into `refs/heads/main` (not into HEAD).
+
+
+```sh
+HEAD              # current commit
+HEAD^   HEAD~1    # parent
+HEAD^2            # SECOND parent (merges only)
+HEAD~3            # three generations back on the first-parent line
+HEAD^{tree}       # the tree of that commit
+HEAD^{}           # peel a tag to the commit it points at
+HEAD:src/main.go  # a specific blob
+:/fix login       # most recent commit whose message matches
+main@{yesterday}  # where main pointed yesterday (from reflog)
+main@{2}          # 2 reflog moves ago
+@{u}  @{push}     # upstream / push-target of current branch
+```
+
+The reflog — your undo history
+Every time a ref moves, git appends a line:
+```sh
+$ cat .git/logs/HEAD
+0000000000000000000000000000000000000000 ac5d1384fc3f... Demo <demo@example.com> 1767225600 +0000	commit (initial): Initial commit
+```
+Old SHA, new SHA, who, when, why. This is local-only, never pushed, and it is why git is nearly impossible to lose work in. Botched rebase, deleted branch, bad reset:
+```sh
+git reflog                       # find the SHA you were at
+git reset --hard HEAD@{5}        # go back
+git branch recovered <sha>       # or rescue it onto a new branch
+```
+
+THE THREE TREES
+Nearly every confusing git command becomes obvious once you see there are three snapshots, not two.
+```sh
+   HEAD              index (staging area)         working tree
+   ────              ────────────────────         ────────────
+   last commit  ←──  what the next commit    ←──  your files
+                     will contain
+```
+
+a commit SHA is a globally unique, tamper-evident name for an exact tree. Every artifact in the pipeline can be keyed by it.
+
+```sh
+git SHA ──► docker tag ──► image digest ──► deployed revision ──► trace/log label
+```
+
+GitOps — git as the source of truth for infrastructure
+Argo CD and Flux invert deployment. Instead of CI pushing to prod, a controller inside the cluster continuously pulls from git and reconciles:
+
+```sh
+   git repo (desired state)          cluster (actual state)
+            │                                  ▲
+            └──── controller: diff ────────────┘
+                  and converge, every 3 min
+```                  No prod credentials in CI	the cluster pulls; CI never needs cluster access ← the big security win
+
+The layout debate is settled in practice: directories per environment, not branches per environment. Branch-per-env means promoting a change is a merge, which drifts, conflicts, and eventually leaves prod with commits staging never had. Directory-per-env means promotion is a diff you can read:
+```sh
+clusters/
+  staging/kustomization.yaml     → image: app:sha-abc123
+  prod/kustomization.yaml        → image: app:sha-def456
+  ```
+Promotion becomes a one-line PR bumping a SHA. Reviewable, revertible, greppable.
+
+CI's job shrinks to: build image, push to registry, open a PR bumping the tag in the env directory. That's the "config as code" pattern and it's how most modern platform teams operate.
+
+
+`git@github.com:postgres/postgres.git`
+
+`https://github.com/postgres/postgres.git`
